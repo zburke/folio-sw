@@ -114,6 +114,9 @@ const startIdleTimer = () => {
   if (idleTimer) {
     clearTimeout(idleTimer);
   }
+
+  document.querySelector('#expires').textContent = new Date(Date.now() + SESSION_LENGTH);
+
   // @@ in reality,
   // @@ idleTimer = setTimeout(logout, rtExpires - Date.now());
   idleTimer = setTimeout(() => {
