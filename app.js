@@ -1,29 +1,42 @@
-const foo = (av) => {
-  return fetch(av ?? 'https://folio-snapshot-okapi.dev.folio.org/saml/check', { headers: { 'x-okapi-tenant': 'diku' } })
-    .then(response => { });
-}
-
-
 const registerSW = async () => {
   if ('serviceWorker' in navigator) {
     try {
-      registration = await navigator.serviceWorker.register('sw.js', { scope: './' });
+      registration = await navigator.serviceWorker.register('sw.js', { scope: './', 'monkey': 'bagel' })
+        .then(registration => {
+          return registration.update();
+        });
 
-      console.log('registration', registration);
       if (registration.installing) {
         console.log('=> Service worker installing');
       } else if (registration.waiting) {
         console.log('=> Service worker installed');
       } else if (registration.active) {
         console.log('=> Service worker active');
+        const sw = registration.active;
+        if (sw) {
+          sw.postMessage({ type: 'OKAPI_URL', value: document.getElementById('okapi').value });
+        }
       }
 
-      navigator.serviceWorker.addEventListener("message", (e) => {
-        console.info('<= message', e.data)
-      });
     } catch (error) {
       console.error(`=> Registration failed with ${error}`);
     }
+
+    navigator.serviceWorker.addEventListener("message", (e) => {
+      console.info('<= message', e.data)
+      if (e.data.type === 'TOKEN_EXPIRATION') {
+        atExpires = new Date(e.data.tokenExpiration.accessTokenExpiration).getTime();
+        rtExpires = new Date(e.data.tokenExpiration.refreshTokenExpiration).getTime();
+      }
+    });
+
+    if (navigator.serviceWorker.controller) {
+      console.log("This page is currently controlled by:", navigator.serviceWorker.controller,);
+    }
+
+    navigator.serviceWorker.oncontrollerchange = () => {
+      console.log( "This page is now controlled by", navigator.serviceWorker.controller);
+    };
   }
 };
 
@@ -40,39 +53,27 @@ const unregisterSW = async () => {
   }
 }
 
-const startAccessTokenTimer = () => {
+
+const startIdleTimer = () => {
   if (timer) {
     clearTimeout(timer);
   }
-  console.log('resetting lastActive')
+  console.log('resetting lastActive', atExpires);
   lastActive = Date.now();
-  timer = setTimeout(handleAccessTokenTimeout, SESSION_LENGTH);
+  // timer = setTimeout(handleIdleTimeout, rtExpires - lastActive);
+  timer = setTimeout(handleIdleTimeout, SESSION_LENGTH);
 }
 
-const rotateAccessToken = () => foo('cookie-vrt');
-
-const handleAccessTokenTimeout = () => {
-  try {
-    if (isActive()) {
-      console.log('at timeout; rotating')
-      rotateAccessToken()
-        // .then(startAccessTokenTimer)
-        .catch(e => {
-          console.error('rtr failure')
-          throw e;
-        });
-    } else {
-      throw(`no activity since ${new Date(lastActive).toISOString()}`)
-    }
-  } catch (e) {
-    console.log('handleActivityTimeout TIMED OUT', e);
+const handleIdleTimeout = () => {
+  if (!isActive()) {
+    console.log(`no activity since ${new Date(lastActive).toISOString()}`)
     logout();
   }
 };
 
 const getUsers = () => {
   const offset = Math.floor(Math.random() * 350);
-  return fetch(`https://folio-snapshot-2-okapi.dev.folio.org/users?limit=1&offset=${offset}`, {
+  return fetch(`${ document.getElementById('okapi').value}/users?limit=1&offset=${offset}`, {
     method: 'GET',
     headers: {
       'x-okapi-tenant': 'diku',
@@ -92,10 +93,10 @@ const getUsers = () => {
 
 const login = () => {
   console.log('login')
-  fetch('https://folio-snapshot-2-okapi.dev.folio.org/bl-users/login-with-expiry', {
+  fetch(`${ document.getElementById('okapi').value}/bl-users/login-with-expiry`, {
     method: 'POST',
     headers: {
-      'x-okapi-tenant': 'diku',
+      'x-okapi-tenant': document.getElementById('tenant').value,
       'content-type': 'application/json',
     },
     body: JSON.stringify({
@@ -114,7 +115,12 @@ const login = () => {
     .then(json => {
       console.log('logged in', json)
       authenticated = true;
-      startAccessTokenTimer();
+      atExpires = new Date(json.tokenExpiration.accessTokenExpiration).getTime();
+      rtExpires = new Date(json.tokenExpiration.refreshTokenExpiration).getTime();
+      talk();
+
+      // startAccessTokenTimer();
+      startIdleTimer()
 
       document.getElementById('authenticated').hidden = false;
       document.getElementById('public').hidden = true;
@@ -131,6 +137,9 @@ const logout = () => {
     clearTimeout(timer)
   }
   authenticated = false;
+  atExpires = Date.now() - 10000;
+  rtExpires = Date.now() - 10000;
+
   let p = Promise.resolve()
     .then(() => {
       console.log('logged out')
@@ -150,39 +159,54 @@ const showUsers = () => {
 const talk = () => {
   const sw = registration.active;
   if (sw) {
-    sw.postMessage([`Hola ${new Date().toISOString()}`]);
+    sw.postMessage({ type: 'TOKEN_EXPIRATION', ...{ atExpires, rtExpires }});
+  } else {
+    console.warn('message failure; could not talk; no active registration')
   }
 };
 
+const invalidateAT = () => {
+  atExpires = 1;
+  talk();
+}
+
+const invalidateRT = () => {
+  atExpires = 1;
+  rtExpires = 1;
+  talk();
+}
+
 /**
- * has there been activity
+ * isActive
+ * return true if SESSION_LENGTH milliseconds have not passed since the
+ * lastActive timestamp.
  * @returns boolean
  */
 const isActive = () => lastActive !== null && Date.now() - lastActive < SESSION_LENGTH;
 
-let count = 0;
 let timer = null;
 let registration = null;
 let lastActive = null;
 let authenticated = false;
+
+let atExpires = null;
+let rtExpires = null;
 // session length in milliseconds
 const SESSION_LENGTH = 10 * 1000;
 
 
-// document.getElementById('a').addEventListener('click', () => foo())
-document.getElementById('vat').addEventListener('click', () => foo('cookie-vat'))
-document.getElementById('vrt').addEventListener('click', () => foo('cookie-vrt'))
-document.getElementById('foo').addEventListener('click', () => foo('cookie-foo'))
-document.getElementById('users').addEventListener('click', () => showUsers())
-document.getElementById('talk').addEventListener('click', () => talk())
+document.getElementById('vat').addEventListener('click', () => invalidateAT());
+document.getElementById('vrt').addEventListener('click', () => invalidateRT());
+document.getElementById('users').addEventListener('click', () => showUsers());
+document.getElementById('talk').addEventListener('click', () => talk());
 
-document.getElementById('login').addEventListener('click', () => login())
-document.getElementById('logout').addEventListener('click', () => logout())
+document.getElementById('login').addEventListener('click', () => login());
+document.getElementById('logout').addEventListener('click', () => logout());
 
 
 document.addEventListener('click', () => {
   if (authenticated) {
-    startAccessTokenTimer();
+    startIdleTimer();
   }
 });
 

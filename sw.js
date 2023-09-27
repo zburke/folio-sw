@@ -1,15 +1,51 @@
+let tokenExpiration = null;
+let okapiUrl = null;
+
 // validate an AT
-const isValidAT = (e) => !e.request.url.includes('cookie') || (e.request.url.includes('cookie') && e.request.url.includes('vat'));
+const isValidAT = () => {
+  return !!(tokenExpiration?.atExpires > Date.now());
+}
 
 // validate an RT
-const isValidRT = (e) => !e.request.url.includes('cookie') || (e.request.url.includes('cookie') && e.request.url.includes('vrt'));
+const isValidRT = () => {
+  return !!(tokenExpiration?.rtExpires > Date.now());
+}
 
-// exchange an RT for a new one
-const rtr = () => {
-  return Promise.resolve();
+
+/**
+ * rtr
+ * exchange an RT for a new one
+ * @param {} e
+ * @returns
+ * @throws if RTR fails
+ */
+const rtr = (e) => {
+  console.log('RTR')
+  return fetch(`${okapiUrl}/authn/refresh`, {
+    method: 'POST',
+    credentials: 'include',
+    mode: 'cors',
+  })
+    .then(res => {
+      if (res.ok) {
+        return res.json();
+      }
+      throw 'RTR response failure';
+    })
+    .then(json => {
+      tokenExpiration = {
+        atExpires: new Date(json.accessTokenExpiration).getTime(),
+        rtExpires: new Date(json.refreshTokenExpiration).getTime(),
+      };
+      console.log('REFRESH BODY', { tokenExpiration })
+      messageToClient(e, { type: 'TOKEN_EXPIRATION', tokenExpiration })
+      return;
+    });
 };
+//     sw.postMessage({ type: 'TOKEN_EXPIRATION', ...{ atExpires, rtExpires }});
 
-const messageToClient = async (e) => {
+
+const messageToClient = async (e, message) => {
   // Exit early if we don't have access to the client.
   // Eg, if it's cross-origin.
   if (!e.clientId) {
@@ -27,27 +63,49 @@ const messageToClient = async (e) => {
   }
 
   // Send a message to the client.
-  console.log('message to', e.clientId)
-  client.postMessage(['passthrough', e.request.url]);
+  console.log(`message to ${e.clientId}`, message);
+  client.postMessage(message);
 };
 
-const passThrough = async (e) => {
-  e.waitUntil(messageToClient(e));
+const isLoginRequest = (request) => {
+  return request.url.includes('login-with-expiry');
+};
 
-  console.log('passThrough', e.request.url)
-  if (isValidAT(e)) {
-    console.log('valid AT')
-    return fetch(e.request, { credentials: 'include' });
+const isRefreshRequest = (request) => {
+  return request.url.includes('authn/refresh');
+};
+
+/**
+ * isPermissibleRequest
+ * Some requests are always permissible, e.g. auth-n and token-rotation.
+ * Others are only permissible if the Access Token is still valid.
+ * @param {} req
+ * @returns
+ */
+const isPermissibleRequest = (req) => {
+  return isLoginRequest(req) || isRefreshRequest(req) || isValidAT();
+}
+
+const passThrough = async (e) => {
+  const req = e.request.clone();
+
+  console.log('passThrough', req.url)
+
+  if (isPermissibleRequest(req)) {
+    return fetch(e.request, { credentials: 'include' })
+      .catch(e => {
+        console.error(e);
+        return Promise.reject(e);
+      });
   }
 
-  if (isValidRT(e)) {
-    console.log('valid RT')
+  if (isValidRT()) {
+    console.log('passthrough: valid RT')
     try {
-      let res = await Promise.resolve('new RT');
-      console.log('RTR renew success', res)
+      let res = await rtr(e);
       return fetch(e.request, { credentials: 'include' });
     } catch (e) {
-      console.log('RTR renew failure')
+      console.log('passThrough fail', e)
     }
   }
 
@@ -60,21 +118,29 @@ const passThrough = async (e) => {
  * on install, force this SW to be the active SW
  */
 self.addEventListener('install', (event) => {
-  console.info('=> install')
+  console.info('=> install', install)
   return self.skipWaiting()
 });
 
 /**
  * activate
- * on activate, force this SW to control all in-scope clients
+ * on activate, force this SW to control all in-scope clients,
+ * even those that loaded before this SW was registered.
  */
 self.addEventListener('activate', async function (event) {
-  console.info('=> activate')
+  console.info('=> activate', event)
   event.waitUntil(clients.claim());
 })
 
 self.addEventListener('message', async function (event) {
   console.info('=> message', event.data)
+  if (event.data.type === 'OKAPI_URL') {
+    okapiUrl = event.data.value;
+  }
+
+  if (event.data.type === 'TOKEN_EXPIRATION') {
+    tokenExpiration = { ...event.data.tokenExpiration }
+  }
 })
 
 /**
@@ -87,24 +153,8 @@ self.addEventListener('message', async function (event) {
  * * Return Promise.reject()
  */
 self.addEventListener('fetch', async function (event) {
-  console.log('=> fetch', event.request.url)
+  console.log('=> fetch') // , event.request.url)
 
   event.respondWith(passThrough(event));
-
-  /*
-  event.respondWith(new Promise(async (resolve, reject) => {
-    return passThrough(event)
-      .then(res => {
-        console.log('pass/resolve')
-        return resolve(res);
-      })
-      // even if we catch, we still see an unhandled promise in Chrome :(
-      // https://bugs.chromium.org/p/chromium/issues/detail?id=1475744
-      .catch(res => {
-        console.log('pass/reject')
-        return reject(res);
-      })
-  }));
-  */
 });
 
