@@ -1,26 +1,42 @@
+/** { atExpires, rtExpires } both are JS millisecond timestamps */
 let tokenExpiration = null;
+
+/** string FQDN including protocol, e.g. https://some-okapi.somewhere.org */
 let okapiUrl = null;
 
-// validate an AT
+/**
+ * isValidAT
+ * return true if tokenExpiration.atExpires is in the future
+ * @returns boolean
+ */
 const isValidAT = () => {
+  console.log(`=> at expires ${new Date(tokenExpiration?.atExpires).getTime()}`)
   return !!(tokenExpiration?.atExpires > Date.now());
 }
 
-// validate an RT
+/**
+ * isValidRT
+ * return true if tokenExpiration.rtExpires is in the future
+ * @returns boolean
+ */
 const isValidRT = () => {
+  console.log(`=> rt expires ${new Date(tokenExpiration?.rtExpires).getTime()}`)
   return !!(tokenExpiration?.rtExpires > Date.now());
 }
 
 
 /**
  * rtr
- * exchange an RT for a new one
- * @param {} e
- * @returns
+ * exchange an RT for a new one.
+ * Make a POST request to /authn/refresh, including the current credentials,
+ * and send a TOKEN_EXPIRATION event to clients that includes the new AT/RT
+ * expiration timestamps.
+ * @param {Event} event
+ * @returns Promise
  * @throws if RTR fails
  */
-const rtr = (e) => {
-  console.log('RTR')
+const rtr = (event) => {
+  console.log('** RTR ...')
   return fetch(`${okapiUrl}/authn/refresh`, {
     method: 'POST',
     credentials: 'include',
@@ -30,31 +46,46 @@ const rtr = (e) => {
       if (res.ok) {
         return res.json();
       }
-      throw 'RTR response failure';
+
+      // rtr failure. return an error message if we got one.
+      return res.json()
+        .then(json => {
+          if (json.errors[0]) {
+            throw `${json.errors[0].message} (${json.errors[0].code})`;
+          } else {
+            throw 'RTR response failure';
+          }
+        });
     })
     .then(json => {
+      console.log('**     success!')
       tokenExpiration = {
         atExpires: new Date(json.accessTokenExpiration).getTime(),
         rtExpires: new Date(json.refreshTokenExpiration).getTime(),
       };
-      console.log('REFRESH BODY', { tokenExpiration })
-      messageToClient(e, { type: 'TOKEN_EXPIRATION', tokenExpiration })
+      // console.log('REFRESH BODY', { tokenExpiration })
+      messageToClient(event, { type: 'TOKEN_EXPIRATION', tokenExpiration })
       return;
     });
 };
-//     sw.postMessage({ type: 'TOKEN_EXPIRATION', ...{ atExpires, rtExpires }});
 
-
-const messageToClient = async (e, message) => {
+/**
+ * messageToClient
+ * Send a message to clients of this service worker
+ * @param {Event} event
+ * @param {*} message
+ * @returns void
+ */
+const messageToClient = async (event, message) => {
   // Exit early if we don't have access to the client.
   // Eg, if it's cross-origin.
-  if (!e.clientId) {
+  if (!event.clientId) {
     console.log('PASSTHROUGH: no clientId')
     return;
   }
 
   // Get the client.
-  const client = await clients.get(e.clientId);
+  const client = await clients.get(event.clientId);
   // Exit early if we don't get the client.
   // Eg, if it closed.
   if (!client) {
@@ -63,9 +94,10 @@ const messageToClient = async (e, message) => {
   }
 
   // Send a message to the client.
-  console.log(`message to ${e.clientId}`, message);
+  console.log('=> sending', message);
   client.postMessage(message);
 };
+
 
 const isLoginRequest = (request) => {
   return request.url.includes('login-with-expiry');
@@ -86,31 +118,58 @@ const isPermissibleRequest = (req) => {
   return isLoginRequest(req) || isRefreshRequest(req) || isValidAT();
 }
 
-const passThrough = async (e) => {
-  const req = e.request.clone();
+const isOkapiRequest = (req) => {
+  return new URL(req.url).origin === okapiUrl;
+}
 
-  console.log('passThrough', req.url)
+/**
+ * passThrough
+ * Inspect event.request to determine whether it's an okapi request.
+ * If it is, make sure its AT is valid or perform RTR before executing it.
+ * If it isn't, execute it immediately.
+ * @param {Event} event
+ * @returns Promise
+ * @throws if any fetch fails
+ */
+const passThrough = async (event) => {
+  const req = event.request.clone();
 
-  if (isPermissibleRequest(req)) {
-    return fetch(e.request, { credentials: 'include' })
-      .catch(e => {
-        console.error(e);
-        return Promise.reject(e);
-      });
-  }
-
-  if (isValidRT()) {
-    console.log('passthrough: valid RT')
-    try {
-      let res = await rtr(e);
-      return fetch(e.request, { credentials: 'include' });
-    } catch (e) {
-      console.log('passThrough fail', e)
+  // okapi requests are subject to RTR
+  if (isOkapiRequest(req)) {
+    console.log('=> fetch', req.url)
+    if (isPermissibleRequest(req)) {
+      console.log('   (valid AT or authn request)')
+      return fetch(event.request, { credentials: 'include' })
+        .catch(e => {
+          console.error(e);
+          return Promise.reject(e);
+        });
     }
+
+    if (isValidRT()) {
+      console.log('=>      valid RT')
+      try {
+        // we don't need the response from RTR, but we do need to await it
+        // to make sure the AT included with the fetch has been refreshed
+        await rtr(event);
+        return fetch(event.request, { credentials: 'include' });
+      } catch (e) {
+        // console.error('passThrough fail', e)
+        return Promise.reject(e);
+      }
+    }
+
+    return Promise.reject('Invalid RT');
   }
 
-  console.log('token failure')
-  return Promise.reject('KABOOM');
+  // default: pass requests through to the network
+  // console.log('passThrough NON-OKAPI', req.url)
+  return fetch(event.request, { credentials: 'include' })
+  .catch(e => {
+    console.error(e);
+    return Promise.reject(e);
+  });
+
 };
 
 /**
@@ -118,7 +177,7 @@ const passThrough = async (e) => {
  * on install, force this SW to be the active SW
  */
 self.addEventListener('install', (event) => {
-  console.info('=> install', install)
+  console.info('=> install', event)
   return self.skipWaiting()
 });
 
@@ -129,32 +188,35 @@ self.addEventListener('install', (event) => {
  */
 self.addEventListener('activate', async function (event) {
   console.info('=> activate', event)
-  event.waitUntil(clients.claim());
+  clients.claim();
+  // event.waitUntil(clients.claim());
 })
 
+/**
+ * eventListener: message
+ * listen for messages from clients and dispatch them accordingly.
+ * OKAPI_URL: store
+ */
 self.addEventListener('message', async function (event) {
-  console.info('=> message', event.data)
+  console.info('=> reading', event.data)
   if (event.data.type === 'OKAPI_URL') {
     okapiUrl = event.data.value;
   }
 
   if (event.data.type === 'TOKEN_EXPIRATION') {
-    tokenExpiration = { ...event.data.tokenExpiration }
+    tokenExpiration = event.data.tokenExpiration;
   }
 })
 
 /**
- * fetch
- * Inspect AT/RT tokens before passing through all fetch requests and
- * returning the resulting promise:
- * * If the AT is valid, return pass through.
- * * If the AT is not valid, perform token rotation if the RT is valid.
- *   * If rotation succceeds, return pass through.
- * * Return Promise.reject()
+ * eventListener: fetch
+ * intercept fetches
  */
 self.addEventListener('fetch', async function (event) {
-  console.log('=> fetch') // , event.request.url)
+  // const clone = event.request.clone();
+  // console.log('=> fetch', clone.url)
 
+  // console.log('=> fetch') // , clone.url)
   event.respondWith(passThrough(event));
 });
 

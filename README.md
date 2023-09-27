@@ -1,16 +1,27 @@
-# simple service worker
+# Okapi RTR service worker
 
-Service Worker test repository. This is a simple demo showing basic service worker features. The demo can be seen on [our GitHub pages](https://mdn.github.io/dom-examples/service-worker/simple-service-worker/).
+run `npx lite-server .` to play with RTR
 
-You can learn more about how this works by reading [using service workers](https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API/Using_Service_Workers).
-In particular, read ["Why is my service worker failing to register?"](https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API/Using_Service_Workers#Why_is_my_service_worker_failing_to_register)
-if you are having problems getting your code to do anything. You need to change the paths relative to where you are serving your files!
+## How?
+This POC installs a service worker (SW) that intercepts fetches and handles
+RTR for those directed to Okapi.
+1. authenticate: provide credentials and click the "login" button
+2. test RTR
+    * open Developer tools and observe the JS console
+    * click the "fetch users" button
+    * click the "expire AT" button to force RTR
+    * click the "fetch users" button
 
-## Running locally
+## Notes
+* In production, session length would be set by the refresh-token's TTL but here it's limited to ten seconds. The session auto-extends via an event-handler that detects activity (here, clicks). The countdown-timer starts on login and then is restarted each time the event-handler detects activity. IOW, click every nine seconds and the session stays alive, or wait ten seconds and be logged out automatically. Set `SESSION_LENGTH` in `app.js` if you want to adjust the session length.
 
-To get this code running locally on your computer as-is, you need to do the following:
+* In SW parlance, the SW immediately activates. Normally, an SW only attaches to resources that load _after_ the SW loads, but that would mean we wouldn't get RTR until after the page was reloaded (SWs are persistent).
+* In SW parlance, the SW claims all clients. This is basically "last one wins", so when multiple tabs/pages are opened, the SW created by the last one grabs control over all open tabs/pages.
 
-1. Ensure that you have Nodejs installed. The best way to do this is either using [`nvm`](https://github.com/nvm-sh/nvm) or [`nvm-windows`](https://github.com/coreybutler/nvm-windows).
-2. Clone the repo in a location on your machine.
-3. Start a local server in the root of this directory using [`lite-server`](https://www.npmjs.com/package/lite-server). `npx lite-server .`
-4. When the server starts, the `index.html`` page will open in your default browser.
+## service worker resources
+
+* https://mdn.github.io/dom-examples/service-worker/simple-service-worker/
+* [using service workers](https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API/Using_Service_Workers)
+* ["Why is my service worker failing to register?"](https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API/Using_Service_Workers#Why_is_my_service_worker_failing_to_register)
+* [Service worker lifecycle deep dive](https://web.dev/service-worker-lifecycle/)
+* [inter-worker communication](https://mdn.github.io/dom-examples/web-workers/simple-web-worker/)

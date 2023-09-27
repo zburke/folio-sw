@@ -1,41 +1,90 @@
+/** setTimeout timer */
+let idleTimer = null;
+
+/** service worker's registration */
+let registration = null;
+
+/** timestamp of last activity in milliseonds */
+let lastActive = -1;
+
+/** are we authenticated? */
+let authenticated = false;
+
+/** AT expiration timestamp in milliseconds */
+let atExpires = -1;
+
+/** RT expiration timestamp in milliseconds */
+let rtExpires = -1;
+
+/** session length in milliseconds */
+// dummy value
+const SESSION_LENGTH = 10 * 1000;
+
+/**
+ * registerSW
+ * * register SW
+ * * send SW the Okapi URL.
+ * * listen for messages sent from SW
+ * Note that although normally a page must be reloaded after a service worker
+ * has been installed in order for the page to be controlled, this one
+ * immediately claims control. Otherwise, no RTR would occur until after a
+ * reload.
+ */
 const registerSW = async () => {
   if ('serviceWorker' in navigator) {
     try {
-      registration = await navigator.serviceWorker.register('sw.js', { scope: './', 'monkey': 'bagel' })
+      let sw = null;
+
+      //
+      // register
+      //
+      registration = await navigator.serviceWorker.register('sw.js', { scope: './' })
         .then(registration => {
           return registration.update();
         });
-
       if (registration.installing) {
+        sw = registration.installing;
         console.log('=> Service worker installing');
       } else if (registration.waiting) {
+        sw = registration.waiting;
         console.log('=> Service worker installed');
       } else if (registration.active) {
+        sw = registration.active;
         console.log('=> Service worker active');
-        const sw = registration.active;
-        if (sw) {
-          sw.postMessage({ type: 'OKAPI_URL', value: document.getElementById('okapi').value });
-        }
       }
 
+      //
+      // send SW an OKAPI_URL message
+      //
+      if (sw) {
+        sw.postMessage({ type: 'OKAPI_URL', value: document.getElementById('okapi').value });
+      } else {
+        console.error('SW NOT AVAILBLE')
+      }
     } catch (error) {
       console.error(`=> Registration failed with ${error}`);
     }
 
+    //
+    // listen for messages
+    //
     navigator.serviceWorker.addEventListener("message", (e) => {
-      console.info('<= message', e.data)
+      console.info('<= reading', e.data)
       if (e.data.type === 'TOKEN_EXPIRATION') {
-        atExpires = new Date(e.data.tokenExpiration.accessTokenExpiration).getTime();
-        rtExpires = new Date(e.data.tokenExpiration.refreshTokenExpiration).getTime();
+        atExpires = e.data.tokenExpiration.atExpires;
+        rtExpires = e.data.tokenExpiration.rtExpires;
+
+        console.log(`atExpires ${atExpires}`)
+        console.log(`rtExpires ${rtExpires}`)
       }
     });
 
+    // talk to me, goose
     if (navigator.serviceWorker.controller) {
-      console.log("This page is currently controlled by:", navigator.serviceWorker.controller,);
+      console.log("This page is currently controlled by:", navigator.serviceWorker.controller);
     }
-
     navigator.serviceWorker.oncontrollerchange = () => {
-      console.log( "This page is now controlled by", navigator.serviceWorker.controller);
+      console.log("This page is now controlled by", navigator.serviceWorker.controller);
     };
   }
 };
@@ -53,30 +102,33 @@ const unregisterSW = async () => {
   }
 }
 
-
+/**
+ * startIdleTimer
+ * Start a timer that should last the length of the session,
+ * calling the timeout-handler if/when it expires. This function
+ * should be called by event-listener that tracks activity: each
+ * time the event-listener pings the existing timer will be cancelled
+ * and a new one started to keep the session alive.
+ */
 const startIdleTimer = () => {
-  if (timer) {
-    clearTimeout(timer);
+  if (idleTimer) {
+    clearTimeout(idleTimer);
   }
-  console.log('resetting lastActive', atExpires);
-  lastActive = Date.now();
-  // timer = setTimeout(handleIdleTimeout, rtExpires - lastActive);
-  timer = setTimeout(handleIdleTimeout, SESSION_LENGTH);
+  // @@ in reality,
+  // @@ idleTimer = setTimeout(logout, rtExpires - Date.now());
+  idleTimer = setTimeout(() => {
+    console.log(`logging out; no activity since ${new Date(lastActive).toISOString()}`)
+    logout();
+  }, SESSION_LENGTH);
 }
 
-const handleIdleTimeout = () => {
-  if (!isActive()) {
-    console.log(`no activity since ${new Date(lastActive).toISOString()}`)
-    logout();
-  }
-};
-
+// look, a fetch! to prove that we can do RTR
 const getUsers = () => {
   const offset = Math.floor(Math.random() * 350);
   return fetch(`${ document.getElementById('okapi').value}/users?limit=1&offset=${offset}`, {
     method: 'GET',
     headers: {
-      'x-okapi-tenant': 'diku',
+      'x-okapi-tenant': document.getElementById('tenant').value,
       'content-type': 'application/json',
     },
     'credentials': 'include',
@@ -91,6 +143,12 @@ const getUsers = () => {
     });
 };
 
+/**
+ * login
+ * send an authentication request
+ * then pluck the JSON from the response
+ * then store tokenExpiration info, send it to SW, start the idle timer
+ */
 const login = () => {
   console.log('login')
   fetch(`${ document.getElementById('okapi').value}/bl-users/login-with-expiry`, {
@@ -117,9 +175,11 @@ const login = () => {
       authenticated = true;
       atExpires = new Date(json.tokenExpiration.accessTokenExpiration).getTime();
       rtExpires = new Date(json.tokenExpiration.refreshTokenExpiration).getTime();
-      talk();
 
-      // startAccessTokenTimer();
+      console.log(`atExpires ${atExpires}`)
+      console.log(`rtExpires ${rtExpires}`)
+
+      dispatchTokenExpiration();
       startIdleTimer()
 
       document.getElementById('authenticated').hidden = false;
@@ -131,14 +191,19 @@ const login = () => {
     });
 };
 
+/**
+ * logout
+ * clear the idle timer
+ */
 const logout = () => {
   console.log('logout')
-  if (timer) {
-    clearTimeout(timer)
+  if (idleTimer) {
+    clearTimeout(idleTimer)
   }
   authenticated = false;
-  atExpires = Date.now() - 10000;
-  rtExpires = Date.now() - 10000;
+  atExpires = -1;
+  rtExpires = -1;
+  dispatchTokenExpiration();
 
   let p = Promise.resolve()
     .then(() => {
@@ -149,67 +214,76 @@ const logout = () => {
     .catch();
 };
 
-const showUsers = () => {
+/**
+ * handleShowUsers
+ * retrieve users via API request and display the result
+ */
+const handleShowUsers = () => {
   getUsers()
     .then(json => {
       document.querySelector('#content').textContent = JSON.stringify(json, null, 2);
     });
 };
 
-const talk = () => {
+/**
+ * dispatchTokenExpiration
+ * send SW a TOKEN_EXPIRATION message
+ */
+const dispatchTokenExpiration = () => {
   const sw = registration.active;
   if (sw) {
-    sw.postMessage({ type: 'TOKEN_EXPIRATION', ...{ atExpires, rtExpires }});
+    const message = { type: 'TOKEN_EXPIRATION', tokenExpiration: { atExpires, rtExpires } };
+    console.log('<= sending', message); console.trace();
+    sw.postMessage(message);
   } else {
-    console.warn('message failure; could not talk; no active registration')
+    console.warn('could not dispatch message; no active registration')
   }
 };
 
+/**
+ * invalidateAT
+ * expire the AT and notify the SW
+ */
 const invalidateAT = () => {
-  atExpires = 1;
-  talk();
-}
-
-const invalidateRT = () => {
-  atExpires = 1;
-  rtExpires = 1;
-  talk();
+  atExpires = -1;
+  dispatchTokenExpiration();
 }
 
 /**
- * isActive
- * return true if SESSION_LENGTH milliseconds have not passed since the
- * lastActive timestamp.
- * @returns boolean
+ * invalidateRT
+ * expire the AT and the RT and notify the SW
  */
-const isActive = () => lastActive !== null && Date.now() - lastActive < SESSION_LENGTH;
+const invalidateRT = () => {
+  atExpires = -1;
+  rtExpires = -1;
 
-let timer = null;
-let registration = null;
-let lastActive = null;
-let authenticated = false;
-
-let atExpires = null;
-let rtExpires = null;
-// session length in milliseconds
-const SESSION_LENGTH = 10 * 1000;
+  console.log(`atExpires ${atExpires}`)
+  console.log(`rtExpires ${rtExpires}`)
 
 
-document.getElementById('vat').addEventListener('click', () => invalidateAT());
-document.getElementById('vrt').addEventListener('click', () => invalidateRT());
-document.getElementById('users').addEventListener('click', () => showUsers());
-document.getElementById('talk').addEventListener('click', () => talk());
-
-document.getElementById('login').addEventListener('click', () => login());
-document.getElementById('logout').addEventListener('click', () => logout());
+  dispatchTokenExpiration();
+}
 
 
+
+/**
+ * eventListener: click activity
+ * * given any click activity, restart the idle timer
+ * * record the last-active timestamp for logging purposes only
+ */
 document.addEventListener('click', () => {
   if (authenticated) {
+    lastActive = Date.now();
     startIdleTimer();
   }
 });
 
+// eventListener: click those buttons
+document.getElementById('vat').addEventListener('click', () => invalidateAT());
+document.getElementById('vrt').addEventListener('click', () => invalidateRT());
+document.getElementById('users').addEventListener('click', () => handleShowUsers());
+document.getElementById('login').addEventListener('click', () => login());
+document.getElementById('logout').addEventListener('click', () => logout());
 
 // await unregisterSW();
 await registerSW();
