@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Service worker demo</title>
+  </head>
+
+  <body>
+    <h1>Service worker demo</h1>
+
+    <section id="authenticated" hidden>
+      <h2>authenticated</h2>
+      <button id="logout">logout</button>
+      <button id="users">fetch users</button>
+      <button id="talk">talk</button>
+
+      <button id="vat">Valid AT</button>
+      <button id="vrt">Valid RT</button>
+      <button id="foo">Invalid Everything</button>
+      <div id="sw-to"></div>
+      <div id="sw-from"></div>
+      <div><pre id="content"></pre></div>
+    </section>
+    <section id="public">
+      <h2>public</h2>
+      <div>username<input id="username" type="text"></div>
+      <div>password<input id="password" type="password"></div>
+      <button id="login">login</button>
+    </section>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
